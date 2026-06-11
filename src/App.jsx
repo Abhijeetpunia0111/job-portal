@@ -5,6 +5,7 @@ import Dashboard from './pages/Dashboard'
 import Jobs from './pages/Jobs'
 import Companies from './pages/Companies'
 import Import from './pages/Import'
+import ImportNaukri from './pages/ImportNaukri'
 import ResumeMatch from './pages/ResumeMatch'
 import Sources from './pages/Sources'
 import { MODE, loadCompanies, loadJobs, addCompany as addCo, updateCompany as updateCo, removeCompany as removeCo, crawlCompany, deleteAllJobs, deleteJobs } from './lib/dataSource'
@@ -132,6 +133,7 @@ export default function App() {
           />
         )}
         {page === 'import' && <Import />}
+        {page === 'naukri' && <ImportNaukri />}
         {page === 'sources' && <Sources jobs={jobs} companies={companies} />}
       </main>
     </div>

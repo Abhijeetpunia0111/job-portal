@@ -6,7 +6,6 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
     port: 5173,
-    open: true,
     // Greenhouse's API blocks browser CORS — proxy it through the dev server
     // so "live mode" works without a backend. Ashby/SmartRecruiters allow CORS.
     proxy: {

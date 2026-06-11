@@ -59,6 +59,13 @@ export const ATS_SOURCES = {
     feed: () => 'User-provided job URL (public guest page)',
     note: 'Parsed from user-submitted public job URLs (authorized, low-volume).',
   },
+  naukri: {
+    label: 'Naukri',
+    color: '#ff7555',
+    match: /naukri\.com/i,
+    feed: () => 'Manual paste (URL + job description, AI-normalized)',
+    note: 'Naukri data is recaptcha-protected; jobs are added by pasting a URL + description.',
+  },
 }
 
 export function detectAts(url = '') {

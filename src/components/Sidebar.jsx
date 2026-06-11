@@ -1,4 +1,4 @@
-import { LayoutDashboard, Building2, Briefcase, Network, Settings, Linkedin, Gauge } from 'lucide-react'
+import { LayoutDashboard, Building2, Briefcase, Network, Settings, Linkedin, Gauge, Search } from 'lucide-react'
 
 const NAV = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -6,6 +6,7 @@ const NAV = [
   { id: 'match', label: 'Resume Match', icon: Gauge },
   { id: 'companies', label: 'Companies', icon: Building2 },
   { id: 'import', label: 'Import from LinkedIn', icon: Linkedin },
+  { id: 'naukri', label: 'Import from Naukri', icon: Search },
   { id: 'sources', label: 'Sources', icon: Network },
 ]
 

@@ -121,6 +121,16 @@ export async function deleteJobs(ids = []) {
   if (error) throw error
 }
 
+// Upsert a single job (used by the Naukri paste-import). Requires Supabase to
+// persist — in live mode there's no job store.
+export async function saveJob(job) {
+  if (MODE !== 'supabase') {
+    throw new Error('Connect Supabase to save imported jobs.')
+  }
+  const { error } = await supabase.from('jobs').upsert(job, { onConflict: 'job_id' })
+  if (error) throw error
+}
+
 // Live fetch for a single company (used to show jobs instantly after Add / Re-crawl,
 // in both modes). In supabase mode we also persist them.
 export async function crawlCompany(company) {

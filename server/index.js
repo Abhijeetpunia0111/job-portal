@@ -2,10 +2,16 @@
 //   npm run server   ->  http://localhost:8787
 // The Vite dev server proxies /api to this (see vite.config.js).
 import 'dotenv/config'
+import { fileURLToPath } from 'node:url'
 import express from 'express'
 import OpenAI from 'openai'
 import { createClient } from '@supabase/supabase-js'
 import { drainLinkedInQueue } from '../crawler/linkedin.js'
+
+// True only when this file is run directly (local `npm run server`). On Vercel
+// it's imported by api/index.js as a serverless handler, so we must NOT start a
+// listener or background intervals there — that work moves to Vercel Cron.
+const isMain = Boolean(process.argv[1]) && fileURLToPath(import.meta.url) === process.argv[1]
 
 const app = express()
 app.use(express.json({ limit: '8mb' }))
@@ -46,13 +52,17 @@ async function purgeQueue() {
   else console.log('[linkedin] queue table cleared (24h purge)')
 }
 
-if (admin) {
-  setInterval(runDrain, DRAIN_INTERVAL_MS)
-  setInterval(purgeQueue, PURGE_INTERVAL_MS)
-  runDrain() // process anything already pending on startup
-  console.log(`LinkedIn queue: auto-drain every ${DRAIN_INTERVAL_MS / 1000}s, purge every 24h`)
-} else {
-  console.log('LinkedIn queue: Supabase not configured — auto-drain disabled')
+// Background timers only make sense on an always-on server (local dev). On
+// Vercel these are driven by Vercel Cron hitting the GET endpoints below.
+if (isMain) {
+  if (admin) {
+    setInterval(runDrain, DRAIN_INTERVAL_MS)
+    setInterval(purgeQueue, PURGE_INTERVAL_MS)
+    runDrain() // process anything already pending on startup
+    console.log(`LinkedIn queue: auto-drain every ${DRAIN_INTERVAL_MS / 1000}s, purge every 24h`)
+  } else {
+    console.log('LinkedIn queue: Supabase not configured — auto-drain disabled')
+  }
 }
 
 // Trigger an immediate drain (called by the frontend right after queuing).
@@ -60,6 +70,17 @@ app.post('/api/linkedin/drain', async (_req, res) => {
   if (!admin) return res.status(400).json({ error: 'Supabase not configured on the server' })
   const result = await runDrain()
   res.json(result)
+})
+
+// Cron-friendly GET endpoints (Vercel Cron sends GET). Configured in vercel.json.
+app.get('/api/cron/drain', async (_req, res) => {
+  if (!admin) return res.status(400).json({ error: 'Supabase not configured' })
+  res.json(await runDrain())
+})
+app.get('/api/cron/purge', async (_req, res) => {
+  if (!admin) return res.status(400).json({ error: 'Supabase not configured' })
+  await purgeQueue()
+  res.json({ ok: true })
 })
 
 const MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini'
@@ -177,7 +198,102 @@ app.post('/api/email', async (req, res) => {
   }
 })
 
-const PORT = process.env.MATCH_PORT || 8787
-app.listen(PORT, () => {
-  console.log(`Resume-match API on http://localhost:${PORT}  (model: ${MODEL}${hasKey ? '' : ', NO OPENAI KEY'})`)
+// ---- Normalize a pasted Naukri (or any) job posting into the unified schema ----
+// Naukri can't be scraped (recaptcha), so the user pastes the URL + the posting
+// text and we structure it with the LLM.
+const NAUKRI_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    title: { type: 'string' },
+    company: { type: 'string' },
+    location: { type: 'string' },
+    country: { type: 'string' },
+    remote: { type: 'string', enum: ['Remote', 'Hybrid', 'On-site'] },
+    employment_type: { type: 'string' },                // Full-time, Contract, Internship, …
+    department: { type: 'string' },
+    seniority: { type: 'string' },                      // e.g. Entry, Mid, Senior
+    salary: { type: 'string' },                         // human string, '' if absent
+    salary_min: { type: ['integer', 'null'] },
+    salary_max: { type: ['integer', 'null'] },
+    skills: { type: 'array', items: { type: 'string' } },
+    posted_date: { type: 'string' },                    // YYYY-MM-DD or ''
+  },
+  required: ['title', 'company', 'location', 'country', 'remote', 'employment_type',
+    'department', 'seniority', 'salary', 'salary_min', 'salary_max', 'skills', 'posted_date'],
+}
+
+const NAUKRI_SYSTEM =
+  'You extract structured fields from a pasted job posting (often from Naukri.com). ' +
+  'Return ONLY what the text supports — never invent. Rules: country = the country of the ' +
+  'location (e.g. "India"); remote = Remote | Hybrid | On-site inferred from the text (default ' +
+  'On-site if unstated); employment_type like "Full-time"/"Contract"/"Internship"; seniority a ' +
+  'short label (Fresher/Entry/Mid/Senior/Lead) inferred from required experience; salary = the ' +
+  'salary string if present (Naukri often shows ranges like "₹8-12 LPA"), else ""; salary_min/max ' +
+  'as integer rupees-per-year if a numeric range is given (e.g. 8 LPA -> 800000), else null; skills ' +
+  '= concrete skills/tools listed; posted_date in YYYY-MM-DD — resolve relative dates ("2 days ago", ' +
+  '"posted today") against the TODAY date given in the user message; use "" if no date is present. ' +
+  'Never guess a date. Use "" or [] for anything missing.'
+
+app.post('/api/naukri/import', async (req, res) => {
+  if (!client) return res.status(500).json({ error: 'OPENAI_API_KEY is not set in .env' })
+  try {
+    const url = String(req.body.url || '').trim()
+    const text = String(req.body.description || '').replace(/\s+/g, ' ').trim().slice(0, 12000)
+    if (!text) return res.status(400).json({ error: 'Paste the job description text to import.' })
+
+    const r = await client.chat.completions.create({
+      model: MODEL,
+      messages: [
+        { role: 'system', content: NAUKRI_SYSTEM },
+        { role: 'user', content: `TODAY: ${new Date().toISOString().slice(0, 10)}\nJOB URL: ${url || '(none)'}\n\nJOB POSTING TEXT:\n${text}` },
+      ],
+      response_format: { type: 'json_schema', json_schema: { name: 'naukri_job', strict: true, schema: NAUKRI_SCHEMA } },
+    })
+    const f = JSON.parse(r.choices[0].message.content)
+
+    // Stable id: trailing number in the URL, else a short hash of url+title.
+    const idMatch = url.match(/(\d{6,})(?:[/?#]|$)/)
+    let id = idMatch ? idMatch[1] : null
+    if (!id) {
+      let h = 0
+      for (const ch of `${url}|${f.title}|${f.company}`) h = (h * 31 + ch.charCodeAt(0)) >>> 0
+      id = h.toString(36)
+    }
+
+    const job = {
+      job_id: `naukri-${id}`,
+      title: f.title,
+      company: f.company || 'Unknown',
+      location: f.location || '',
+      country: f.country || '',
+      remote: f.remote || 'On-site',
+      employment_type: f.employment_type || 'Full-time',
+      department: f.department || '',
+      seniority: f.seniority || '',
+      salary: f.salary || '',
+      salary_min: f.salary_min ?? null,
+      salary_max: f.salary_max ?? null,
+      skills: Array.isArray(f.skills) ? f.skills : [],
+      description: String(req.body.description || '').trim().slice(0, 8000),
+      apply_url: url,
+      linkedin_url: '',
+      source: 'naukri',
+      posted_date: f.posted_date || '',
+    }
+    res.json({ job })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
 })
+
+// Start a listener only for local dev. On Vercel the app is imported as a
+// serverless function (see api/index.js) and Vercel handles the HTTP layer.
+if (isMain) {
+  const PORT = process.env.MATCH_PORT || 8787
+  app.listen(PORT, () => {
+    console.log(`Resume-match API on http://localhost:${PORT}  (model: ${MODEL}${hasKey ? '' : ', NO OPENAI KEY'})`)
+  })
+}
+
+export default app

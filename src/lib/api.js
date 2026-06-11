@@ -23,6 +23,18 @@ export async function writeOutreachEmail({ resumeText, file, jobText }) {
   return data
 }
 
+// Normalize a pasted Naukri job (URL + description text) into the unified schema.
+export async function importNaukriJob({ url, description }) {
+  const res = await fetch('/api/naukri/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url, description }),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error || `Naukri import error ${res.status}`)
+  return data.job
+}
+
 // Read a File as { name, base64 } for upload (PDF parsed server-side).
 export function fileToPayload(file) {
   return new Promise((resolve, reject) => {
